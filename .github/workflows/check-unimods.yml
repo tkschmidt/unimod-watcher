@@ -155,6 +155,7 @@ jobs:
         # Create pull request using GitHub CLI
         gh pr create \
           --title "$PR_TITLE" \
+          --assignee "tkschmidt" \
           --body "This pull request contains an automated $(echo $COMMIT_TYPE | tr '[:upper:]' '[:lower:]') of the Unimod tables XML file.
 
         ## Changes
