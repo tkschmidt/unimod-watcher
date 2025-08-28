@@ -1,0 +1,200 @@
+
+name: Check Unimod XML Updates
+
+on:
+  schedule:
+    # Run every night at 2 AM UTC
+    - cron: '0 2 * * *'
+  # Allow manual triggers
+  workflow_dispatch:
+  # Run on pushes to main (for testing)
+  push:
+    branches: [ main ]
+    paths: [ '.github/workflows/check-unimod.yml' ]
+
+env:
+  UNIMOD_URL: "https://www.unimod.org/xml/unimod_tables.xml"
+  FILE_NAME: "unimod_tables.xml"
+  CHECKSUM_FILE: "unimod_tables.xml.md5"
+  VERSIONS_DIR: "versions"
+
+jobs:
+  check-unimod-updates:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        # Need full history to create branches
+        fetch-depth: 0
+        # Use GitHub token for authentication
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Configure Git
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+    - name: Download and check Unimod XML
+      id: check
+      run: |
+        echo "Downloading current Unimod XML file..."
+        curl -L -o "${FILE_NAME}.new" "$UNIMOD_URL"
+        
+        # Calculate MD5 of the new file
+        NEW_MD5=$(md5sum "${FILE_NAME}.new" | cut -d' ' -f1)
+        echo "New file MD5: $NEW_MD5"
+        echo "new_md5=$NEW_MD5" >> $GITHUB_OUTPUT
+        
+        # Check if we have an existing file and checksum
+        if [ -f "$FILE_NAME" ] && [ -f "$CHECKSUM_FILE" ]; then
+          OLD_MD5=$(cat "$CHECKSUM_FILE")
+          echo "Existing file MD5: $OLD_MD5"
+          echo "old_md5=$OLD_MD5" >> $GITHUB_OUTPUT
+          
+          if [ "$NEW_MD5" = "$OLD_MD5" ]; then
+            echo "No changes detected."
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 0
+          else
+            echo "Changes detected!"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "No existing file found. This is the initial setup."
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "old_md5=none" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Create Pull Request
+      if: steps.check.outputs.has_changes == 'true'
+      run: |
+        # Handle empty repository case
+        if [ ! -f "$FILE_NAME" ] && [ ! -f "$CHECKSUM_FILE" ]; then
+          echo "🚀 Initial setup: Adding Unimod XML file to empty repository"
+          COMMIT_TYPE="Initial"
+          PR_TITLE="Initial Unimod XML file - $(date +%Y-%m-%d)"
+        else
+          echo "🔄 Updating existing Unimod XML file"
+          COMMIT_TYPE="Update"
+          PR_TITLE="Automated Unimod XML Update - $(date +%Y-%m-%d)"
+        fi
+        
+        # Create a new branch for the update
+        BRANCH_NAME="update-unimod-$(date +%Y%m%d-%H%M%S)"
+        echo "Creating branch: $BRANCH_NAME"
+        
+        # Ensure we have a main branch to work from
+        if ! git show-ref --verify --quiet refs/heads/main; then
+          echo "No main branch found, creating initial commit on main"
+          # Replace the old file with the new one
+          mv "${FILE_NAME}.new" "$FILE_NAME"
+          echo "${{ steps.check.outputs.new_md5 }}" > "$CHECKSUM_FILE"
+          
+          # Create initial versions directory
+          mkdir -p "$VERSIONS_DIR"
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          cp "$FILE_NAME" "$VERSIONS_DIR/unimod_tables_${TIMESTAMP}.xml"
+          cp "$CHECKSUM_FILE" "$VERSIONS_DIR/unimod_tables_${TIMESTAMP}.xml.md5"
+          ln -sf "../$FILE_NAME" "$VERSIONS_DIR/latest.xml"
+          
+          git add "$FILE_NAME" "$CHECKSUM_FILE" "$VERSIONS_DIR/"
+          git commit -m "Initial commit: Add Unimod tables XML file
+
+          - Downloaded from: $UNIMOD_URL
+          - MD5: ${{ steps.check.outputs.new_md5 }}
+          - Date: $(date -Iseconds)
+          
+          This is the initial setup of automated Unimod monitoring."
+          git push origin main
+          echo "✅ Initial commit created on main branch. No PR needed for empty repo setup."
+          exit 0
+        fi
+        
+        git checkout -b "$BRANCH_NAME"
+        
+        # Create versions directory if it doesn't exist
+        mkdir -p "$VERSIONS_DIR"
+        
+        # Create timestamped version of the new file
+        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        VERSIONED_FILE="$VERSIONS_DIR/unimod_tables_${TIMESTAMP}.xml"
+        VERSIONED_MD5="$VERSIONS_DIR/unimod_tables_${TIMESTAMP}.xml.md5"
+        
+        # Copy new file to versioned location AND update main file
+        cp "${FILE_NAME}.new" "$VERSIONED_FILE"
+        cp "${FILE_NAME}.new" "$FILE_NAME"
+        echo "${{ steps.check.outputs.new_md5 }}" > "$VERSIONED_MD5"
+        echo "${{ steps.check.outputs.new_md5 }}" > "$CHECKSUM_FILE"
+        
+        # Create a latest.xml symlink for easy access
+        ln -sf "../$FILE_NAME" "$VERSIONS_DIR/latest.xml"
+        
+        # Add all files to git
+        git add "$FILE_NAME" "$CHECKSUM_FILE" "$VERSIONED_FILE" "$VERSIONED_MD5" "$VERSIONS_DIR/latest.xml"
+        
+        # Create commit message with details
+        COMMIT_MSG="$COMMIT_TYPE Unimod tables XML file
+
+        - Downloaded from: $UNIMOD_URL
+        - New MD5: ${{ steps.check.outputs.new_md5 }}
+        - Previous MD5: ${{ steps.check.outputs.old_md5 }}
+        - Date: $(date -Iseconds)
+        
+        This is an automated $COMMIT_TYPE from the nightly check."
+        
+        git commit -m "$COMMIT_MSG"
+        
+        # Push the branch
+        git push origin "$BRANCH_NAME"
+        
+        # Create pull request using GitHub CLI
+        gh pr create \
+          --title "$PR_TITLE" \
+          --body "This pull request contains an automated $(echo $COMMIT_TYPE | tr '[:upper:]' '[:lower:]') of the Unimod tables XML file.
+
+        ## Changes
+        - 📄 $([ "$COMMIT_TYPE" = "Initial" ] && echo "Added" || echo "Updated") \`unimod_tables.xml\` with latest version from unimod.org
+        - 📁 Added versioned file: \`$VERSIONED_FILE\`
+        - 🔐 $([ "$COMMIT_TYPE" = "Initial" ] && echo "Initial" || echo "New") MD5 checksum: \`${{ steps.check.outputs.new_md5 }}\`
+        - 🕒 Downloaded on: $(date -Iseconds)
+        - 🔗 Source: $UNIMOD_URL
+
+        ## File Structure
+        - \`unimod_tables.xml\` - Always contains the latest version
+        - \`versions/unimod_tables_${TIMESTAMP}.xml\` - Timestamped version
+        - \`versions/latest.xml\` - Symlink to latest version
+        - \`unimod_tables.xml.md5\` - MD5 of current version
+
+        $([ "$COMMIT_TYPE" != "Initial" ] && echo "## Previous Version
+        - 🔐 Previous MD5: \`${{ steps.check.outputs.old_md5 }}\`" || echo "## Repository Setup
+        - 🚀 This is the initial addition of Unimod XML monitoring to this repository")
+
+        ---
+        🤖 This PR was created automatically by the nightly check workflow." \
+          --head "$BRANCH_NAME" \
+          --base main \
+          --label "automated,unimod-update"
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Cleanup on no changes
+      if: steps.check.outputs.has_changes == 'false'
+      run: |
+        echo "✅ No changes detected - Unimod XML file is up to date"
+        rm -f "${FILE_NAME}.new"
+
+    - name: Summary
+      run: |
+        if [ "${{ steps.check.outputs.has_changes }}" = "true" ]; then
+          echo "🔄 **Changes detected!** Created pull request with updated Unimod XML file." >> $GITHUB_STEP_SUMMARY
+          echo "- New MD5: \`${{ steps.check.outputs.new_md5 }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Previous MD5: \`${{ steps.check.outputs.old_md5 }}\`" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "✅ **No changes detected** - Unimod XML file is current." >> $GITHUB_STEP_SUMMARY
+          echo "- Current MD5: \`${{ steps.check.outputs.new_md5 }}\`" >> $GITHUB_STEP_SUMMARY
+        fi
