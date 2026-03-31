@@ -39,12 +39,19 @@ jobs:
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+
     - name: Download and check Unimod XML
       id: check
       run: |
         echo "Downloading current Unimod XML file..."
         curl -L -o "${FILE_NAME}.new" "$UNIMOD_URL"
-        
+
+        echo "Normalizing XML (sort attributes for stable diffs)..."
+        uv run --script normalize_xml.py "${FILE_NAME}.new" > "${FILE_NAME}.normalized"
+        mv "${FILE_NAME}.normalized" "${FILE_NAME}.new"
+
         # Calculate MD5 of the new file
         NEW_MD5=$(md5sum "${FILE_NAME}.new" | cut -d' ' -f1)
         echo "New file MD5: $NEW_MD5"
@@ -130,13 +137,25 @@ jobs:
         cp "${FILE_NAME}.new" "$FILE_NAME"
         echo "${{ steps.check.outputs.new_md5 }}" > "$VERSIONED_MD5"
         echo "${{ steps.check.outputs.new_md5 }}" > "$CHECKSUM_FILE"
-        
+
         # Create a latest.xml symlink for easy access
         ln -sf "../$FILE_NAME" "$VERSIONS_DIR/latest.xml"
-        
+
+        # Generate semantic diff for PR body
+        PREV_VERSIONED=$(ls "$VERSIONS_DIR"/unimod_tables_*.xml 2>/dev/null | sort | tail -2 | head -1)
+        if [ -n "$PREV_VERSIONED" ] && [ "$PREV_VERSIONED" != "$VERSIONED_FILE" ]; then
+          MOD_DIFF=$(uv run --script diff_unimod.py "$PREV_VERSIONED" "$VERSIONED_FILE")
+        else
+          MOD_DIFF="## Unimod Changes\n\n_No previous version to compare against._"
+        fi
+
+        # Append diff to README.md changelog
+        printf "\n---\n\n## %s — \`%s\`\n\n%s\n" \
+          "$(date +%Y-%m-%d)" "$VERSIONED_FILE" "$MOD_DIFF" >> README.md
+
         # Add all files to git
-        git add "$FILE_NAME" "$CHECKSUM_FILE" "$VERSIONED_FILE" "$VERSIONED_MD5" "$VERSIONS_DIR/latest.xml"
-        
+        git add "$FILE_NAME" "$CHECKSUM_FILE" "$VERSIONED_FILE" "$VERSIONED_MD5" "$VERSIONS_DIR/latest.xml" README.md
+
         # Create commit message with details
         COMMIT_MSG="$COMMIT_TYPE Unimod tables XML file
 
@@ -144,36 +163,28 @@ jobs:
         - New MD5: ${{ steps.check.outputs.new_md5 }}
         - Previous MD5: ${{ steps.check.outputs.old_md5 }}
         - Date: $(date -Iseconds)
-        
+
         This is an automated $COMMIT_TYPE from the nightly check."
-        
+
         git commit -m "$COMMIT_MSG"
-        
+
         # Push the branch
         git push origin "$BRANCH_NAME"
-        
+
         # Create pull request using GitHub CLI
         gh pr create \
           --title "$PR_TITLE" \
           --assignee "tkschmidt" \
           --body "This pull request contains an automated $(echo $COMMIT_TYPE | tr '[:upper:]' '[:lower:]') of the Unimod tables XML file.
 
-        ## Changes
+        ## Details
         - 📄 $([ "$COMMIT_TYPE" = "Initial" ] && echo "Added" || echo "Updated") \`unimod_tables.xml\` with latest version from unimod.org
         - 📁 Added versioned file: \`$VERSIONED_FILE\`
         - 🔐 $([ "$COMMIT_TYPE" = "Initial" ] && echo "Initial" || echo "New") MD5 checksum: \`${{ steps.check.outputs.new_md5 }}\`
         - 🕒 Downloaded on: $(date -Iseconds)
         - 🔗 Source: $UNIMOD_URL
 
-        ## File Structure
-        - \`unimod_tables.xml\` - Always contains the latest version
-        - \`versions/unimod_tables_${TIMESTAMP}.xml\` - Timestamped version
-        - \`versions/latest.xml\` - Symlink to latest version
-        - \`unimod_tables.xml.md5\` - MD5 of current version
-
-        $([ "$COMMIT_TYPE" != "Initial" ] && echo "## Previous Version
-        - 🔐 Previous MD5: \`${{ steps.check.outputs.old_md5 }}\`" || echo "## Repository Setup
-        - 🚀 This is the initial addition of Unimod XML monitoring to this repository")
+        $MOD_DIFF
 
         ---
         🤖 This PR was created automatically by the nightly check workflow." \
